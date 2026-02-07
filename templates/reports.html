@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block content %}
+
+<a href="{{ url_for('home') }}" class="inline-flex items-center text-sm font-semibold text-gray-600">
+  ← Back
+</a>
+
+<div class="mt-4 bg-white rounded-2xl border shadow-sm p-4">
+  <h2 class="text-xl font-bold">Reports</h2>
+  <p class="text-sm text-gray-600 mt-1">Income vs Expenses donut chart with date range + currency filter.</p>
+
+  <form class="mt-4 grid grid-cols-2 gap-3" method="get" action="{{ url_for('reports') }}">
+    <div>
+      <label class="text-sm font-medium">From</label>
+      <input type="date" name="from" value="{{ start }}"
+             class="mt-1 w-full rounded-xl border px-3 py-2 bg-white" />
+    </div>
+
+    <div>
+      <label class="text-sm font-medium">To</label>
+      <input type="date" name="to" value="{{ end }}"
+             class="mt-1 w-full rounded-xl border px-3 py-2 bg-white" />
+    </div>
+
+    <div class="col-span-2">
+      <label class="text-sm font-medium">Currency</label>
+      <select name="currency" class="mt-1 w-full rounded-xl border px-3 py-2 bg-white">
+        <option value="ALL" {% if selected_currency == "ALL" %}selected{% endif %}>ALL (separate charts)</option>
+        {% for c in currencies %}
+          <option value="{{ c }}" {% if selected_currency == c %}selected{% endif %}>{{ c }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <button class="col-span-2 rounded-2xl bg-blue-600 text-white py-3 font-semibold">
+      Show Report
+    </button>
+  </form>
+</div>
+
+<div class="mt-4 space-y-3">
+  {% if charts and charts|length > 0 %}
+    {% for cur, data in charts.items() %}
+      <div class="bg-white rounded-2xl border shadow-sm p-4">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <h3 class="text-lg font-semibold">Income vs Expenses ({{ cur }})</h3>
+            <div class="text-sm text-gray-600 mt-1">
+              Income: <span class="font-semibold">{{ "%.2f"|format(data.income) }}</span> —
+              Expenses: <span class="font-semibold">{{ "%.2f"|format(data.expense) }}</span>
+            </div>
+          </div>
+        </div>
+
+        <img src="{{ data.url }}" alt="Donut chart {{ cur }}" class="mt-4 w-full rounded-xl border" />
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="bg-white rounded-2xl border shadow-sm p-4 text-sm text-gray-600">
+      No transactions found in this date range for the selected currency.
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}
