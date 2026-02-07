@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="mt-6 bg-white rounded-2xl border shadow-sm p-4">
+  <h2 class="text-xl font-bold">Verify Email</h2>
+  <p class="text-sm text-gray-600 mt-1">
+    Enter the 6-digit code we sent to your email.
+  </p>
+
+  <form class="mt-4 space-y-4" method="post" action="{{ url_for('verify_email_post') }}">
+    <div>
+      <label class="text-sm font-medium">Verification code</label>
+      <input name="code" inputmode="numeric" maxlength="6" placeholder="123456"
+             class="mt-1 w-full rounded-xl border px-3 py-2 bg-white text-center tracking-widest text-lg" required />
+    </div>
+
+    <button class="w-full rounded-2xl bg-blue-600 text-white py-3 font-semibold">
+      Verify
+    </button>
+  </form>
+</div>
+
+{% endblock %}
