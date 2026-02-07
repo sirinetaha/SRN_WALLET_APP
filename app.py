@@ -23,7 +23,7 @@ app.config.update(
 )
 
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
-
+init_db()
 
 CURRENCIES = ["USD", "EUR", "TRY", "LBP"]
 def generate_otp():
@@ -584,6 +584,6 @@ def send_verification_email(to_email: str, code: str):
 
 
 if __name__ == "__main__":
-    init_db()
     
     app.run(host="0.0.0.0",port=5000, debug=True)
+
