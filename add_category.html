@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+
+<a href="{{ url_for('home') }}" class="inline-flex items-center text-sm font-semibold text-gray-600">
+  ← Back
+</a>
+
+<div class="mt-4 bg-white rounded-2xl border shadow-sm p-4">
+  <h2 class="text-xl font-bold">Add Category</h2>
+  <p class="text-sm text-gray-600 mt-1">Create a custom category (envelope).</p>
+
+  <form class="mt-4 space-y-4" method="post" action="{{ url_for('add_category_post') }}">
+    <div>
+      <label class="text-sm font-medium">Category name</label>
+      <input name="name" type="text" maxlength="40" placeholder="e.g. Freelance, Gifts, Travel"
+             class="mt-1 w-full rounded-xl border px-3 py-2 bg-white" required />
+    </div>
+
+    <div class="grid grid-cols-2 gap-3 pt-2">
+      <a href="{{ url_for('home') }}" class="rounded-2xl border bg-white py-3 font-semibold text-center">
+        Cancel
+      </a>
+      <button class="rounded-2xl bg-blue-600 text-white py-3 font-semibold">
+        Save
+      </button>
+    </div>
+  </form>
+</div>
+
+{% endblock %}

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="mt-6 bg-white rounded-2xl border shadow-sm p-4">
+  <h2 class="text-xl font-bold">Create Account</h2>
+
+  <form class="mt-4 space-y-4" method="post" action="{{ url_for('register_post') }}">
+    <div>
+      <label class="text-sm font-medium">Email</label>
+      <input name="email" type="email" required class="mt-1 w-full rounded-xl border px-3 py-2 bg-white" />
+    </div>
+    <div>
+      <label class="text-sm font-medium">Password</label>
+      <input name="password" type="password" required minlength="6"
+             class="mt-1 w-full rounded-xl border px-3 py-2 bg-white" />
+      <p class="text-xs text-gray-500 mt-1">Minimum 6 characters.</p>
+    </div>
+    <button class="w-full rounded-2xl bg-blue-600 text-white py-3 font-semibold">Sign up</button>
+  </form>
+
+  <p class="text-sm text-gray-600 mt-4 text-center">
+    Already have an account?
+    <a class="font-semibold text-blue-700" href="{{ url_for('login') }}">Login</a>
+  </p>
+</div>
+{% endblock %}
