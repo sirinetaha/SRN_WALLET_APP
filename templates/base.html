@@ -16,11 +16,7 @@
       <button class="px-3 py-2 rounded-xl border bg-white text-sm font-medium">
         EN <span class="ml-1">▾</span>
       </button>
-            {% if session.get('user_id') %}
-        <form method="post" action="{{ url_for('logout') }}">
-          <button class="px-3 py-2 rounded-xl border bg-white text-sm font-medium">Logout</button>
-        </form>
-      {% endif %}
+           
 
     </header>
 
