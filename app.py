@@ -1,20 +1,19 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
+# app.py — Single-user SRN Envelope Wallet (no login / no register / no email)
+# Opens directly to Home and always uses one local user in the DB.
+
+from flask import Flask, render_template, request, redirect, url_for, flash, session
 from datetime import date
-from db import get_conn, init_db, seed_defaults_for_user
+from functools import wraps
+import os
 import io
 import base64
 import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from datetime import date
-from functools import wraps
-from werkzeug.security import generate_password_hash, check_password_hash
-from flask import session
-import os
-import random
-import smtplib
-from email.message import EmailMessage
-from datetime import datetime, timedelta, UTC
+import matplotlib.pyplot as plt  # noqa: E402
+
+from db import get_conn, init_db, seed_defaults_for_user
+
 
 app = Flask(__name__)
 app.config.update(
@@ -22,30 +21,98 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Lax",
 )
 
+# Keep a stable secret key in Render ENV for persistent sessions across deploys
+# (recommended) SECRET_KEY="some-long-random-string"
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
+
 init_db()
 
 CURRENCIES = ["USD", "EUR", "TRY", "LBP"]
-def generate_otp():
-    # 6-digit numeric code
-    return f"{random.randint(0, 999999):06d}"
 
-def utc_now():
-    return datetime.now(UTC)
+# Single-user identity (only used to find/create your one user row)
+SINGLE_USER_EMAIL = os.environ.get("SINGLE_USER_EMAIL", "sirine@local")
 
-def utc_plus_minutes(minutes: int):
-    return (utc_now() + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
-
-def login_required(view):
-    @wraps(view)
-    def wrapped(*args, **kwargs):
-        if "user_id" not in session:
-            return redirect(url_for("login"))
-        return view(*args, **kwargs)
-    return wrapped
 
 def current_user_id():
     return session.get("user_id")
+
+
+def login_required(view):
+    """Kept for safety; in single-user mode user_id is always present."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if "user_id" not in session:
+            # Should never happen because of before_request
+            session["user_id"] = ensure_single_user()
+        return view(*args, **kwargs)
+    return wrapped
+
+
+def _users_table_columns(conn):
+    # Works with SQLite
+    rows = conn.execute("PRAGMA table_info(users)").fetchall()
+    # row may be dict-like depending on row_factory; handle both
+    cols = []
+    for r in rows:
+        if isinstance(r, dict):
+            cols.append(r.get("name"))
+        else:
+            # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+            cols.append(r[1])
+    return set([c for c in cols if c])
+
+
+def ensure_single_user():
+    """
+    Ensures there is exactly one local user and returns its user_id.
+    Creates user row if missing and seeds default categories for that user.
+    This function is schema-tolerant: it adapts to your users table columns.
+    """
+    with get_conn() as conn:
+        u = conn.execute("SELECT id FROM users WHERE email=?", (SINGLE_USER_EMAIL,)).fetchone()
+        if u:
+            return int(u["id"]) if isinstance(u, dict) or hasattr(u, "__getitem__") else int(u[0])
+
+        cols = _users_table_columns(conn)
+
+        # Build a safe INSERT that matches your actual schema
+        insert_cols = []
+        insert_vals = []
+
+        if "email" in cols:
+            insert_cols.append("email")
+            insert_vals.append(SINGLE_USER_EMAIL)
+
+        # Optional columns often present in your earlier code
+        if "is_verified" in cols:
+            insert_cols.append("is_verified")
+            insert_vals.append(1)
+
+        if "password_hash" in cols:
+            insert_cols.append("password_hash")
+            insert_vals.append("")  # not used in single-user mode
+
+        # If your schema has created_at, etc., rely on defaults; do not invent values.
+
+        if not insert_cols:
+            # Extremely unlikely, but prevents silent breakage
+            raise RuntimeError("Could not detect usable columns in users table (expected at least 'email').")
+
+        sql = f"INSERT INTO users({', '.join(insert_cols)}) VALUES ({', '.join(['?'] * len(insert_cols))})"
+        cur = conn.execute(sql, tuple(insert_vals))
+        user_id = cur.lastrowid
+
+    # Seed defaults (categories) for this user
+    seed_defaults_for_user(user_id)
+    return int(user_id)
+
+
+@app.before_request
+def auto_login_single_user():
+    # Always keep a user_id in session so app opens to home without auth.
+    if "user_id" not in session:
+        session["user_id"] = ensure_single_user()
+
 
 def category_balance(conn, category_id: int, user_id: int):
     rows = conn.execute("""
@@ -62,7 +129,7 @@ def category_balance(conn, category_id: int, user_id: int):
     return balances
 
 
-def global_balances(conn,user_id):
+def global_balances(conn, user_id: int):
     rows = conn.execute("""
         SELECT currency,
                SUM(CASE WHEN type='deposit' THEN amount ELSE -amount END) AS bal
@@ -76,10 +143,13 @@ def global_balances(conn,user_id):
         balances[r["currency"]] = float(r["bal"] or 0.0)
     return balances
 
+
 @app.get("/")
-@login_required
 def home():
     uid = current_user_id()
+    if not uid:
+        uid = ensure_single_user()
+        session["user_id"] = uid
 
     with get_conn() as conn:
         cats = conn.execute("""
@@ -115,14 +185,14 @@ def home():
 def deposit_form(category_id):
     return tx_form(category_id, tx_type="deposit")
 
+
 @app.get("/category/<int:category_id>/withdraw")
 def withdraw_form(category_id):
     return tx_form(category_id, tx_type="withdraw")
 
+
 def tx_form(category_id: int, tx_type: str):
     uid = current_user_id()
-    if not uid:
-        return redirect(url_for("login"))
 
     with get_conn() as conn:
         cat = conn.execute(
@@ -136,7 +206,7 @@ def tx_form(category_id: int, tx_type: str):
 
         balances = category_balance(conn, category_id, uid)
 
-    # Filter currencies with balance > 0 (ONLY for withdraw)
+    # Withdraw: show only currencies with positive balance
     if tx_type == "withdraw":
         available_currencies = [cur for cur, bal in balances.items() if bal > 0]
         if not available_currencies:
@@ -162,17 +232,14 @@ def save_tx(category_id):
     tx_date = request.form.get("tx_date") or date.today().isoformat()
     note = (request.form.get("note") or "").strip()
     uid = current_user_id()
-    if not uid:
-        return redirect(url_for("login"))
 
-    # amount parsing
     raw_amount = (request.form.get("amount") or "").strip()
     try:
         amount = float(raw_amount)
     except ValueError:
         flash("Amount must be a number.", "error")
         return redirect(request.referrer or url_for("home"))
-    
+
     if amount <= 0:
         flash("Amount must be greater than 0.", "error")
         return redirect(request.referrer or url_for("home"))
@@ -186,38 +253,35 @@ def save_tx(category_id):
         return redirect(request.referrer or url_for("home"))
 
     with get_conn() as conn:
-        # Validate category exists
-        cat = conn.execute("SELECT * FROM categories WHERE id=? AND user_id=?", (category_id,uid)).fetchone()
+        cat = conn.execute(
+            "SELECT * FROM categories WHERE id=? AND user_id=?",
+            (category_id, uid)
+        ).fetchone()
         if not cat:
             flash("Category not found.", "error")
             return redirect(url_for("home"))
 
-        # Withdraw validation: cannot exceed category balance in that currency
         if tx_type == "withdraw":
-            bals = category_balance(conn, category_id, uid)  # ✅ correct
-            if amount > bals.get(currency, 0.0) + 1e-9:
+            bals = category_balance(conn, category_id, uid)
+            if amount > (bals.get(currency, 0.0) + 1e-9):
                 flash(f"Insufficient funds in {currency}. Available: {bals.get(currency, 0.0):.2f}", "error")
                 return redirect(url_for("withdraw_form", category_id=category_id))
-
-        uid = current_user_id()
 
         conn.execute("""
             INSERT INTO transactions(user_id, category_id, type, amount, currency, tx_date, note)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (uid, category_id, tx_type, amount, currency, tx_date, note if note else None))
 
-
     flash("Saved.", "success")
     return redirect(url_for("home"))
 
+
 @app.get("/transactions")
-@login_required
 def transactions():
     uid = current_user_id()
-    # optional filter by category or date range later
     with get_conn() as conn:
         rows = conn.execute("""
-              SELECT t.*, c.name AS category_name
+            SELECT t.*, c.name AS category_name
             FROM transactions t
             JOIN categories c ON c.id = t.category_id
             WHERE t.user_id=?
@@ -225,16 +289,18 @@ def transactions():
             LIMIT 200
         """, (uid,)).fetchall()
     return render_template("transactions.html", rows=rows)
+
+
 @app.get("/categories/new")
 def add_category():
     return render_template("add_category.html")
 
+
 @app.post("/categories/new")
-@login_required
 def add_category_post():
     uid = current_user_id()
     raw = (request.form.get("name") or "")
-    name = " ".join(raw.strip().split())  # trim + collapse multiple spaces
+    name = " ".join(raw.strip().split())
 
     if not name:
         flash("Category name is required.", "error")
@@ -245,7 +311,6 @@ def add_category_post():
         return redirect(url_for("add_category"))
 
     with get_conn() as conn:
-        # Case-insensitive duplicate check per user
         existing = conn.execute(
             "SELECT 1 FROM categories WHERE user_id=? AND lower(name)=lower(?)",
             (uid, name)
@@ -262,8 +327,8 @@ def add_category_post():
     flash("Category added.", "success")
     return redirect(url_for("home"))
 
+
 @app.post("/category/<int:category_id>/delete")
-@login_required
 def delete_category(category_id):
     uid = current_user_id()
 
@@ -277,7 +342,6 @@ def delete_category(category_id):
             flash("Category not found.", "error")
             return redirect(url_for("home"))
 
-        # Delete category
         conn.execute(
             "DELETE FROM categories WHERE id=? AND user_id=?",
             (category_id, uid)
@@ -285,8 +349,9 @@ def delete_category(category_id):
 
     flash("Category deleted.", "success")
     return redirect(url_for("home"))
+
+
 @app.get("/reports")
-@login_required
 def reports():
     uid = current_user_id()
     today = date.today()
@@ -296,7 +361,6 @@ def reports():
     start = request.args.get("from", start_default)
     end = request.args.get("to", end_default)
 
-    # Currency filter: ALL or one of CURRENCIES
     selected_currency = request.args.get("currency", "ALL").upper()
     if selected_currency != "ALL" and selected_currency not in CURRENCIES:
         selected_currency = "ALL"
@@ -306,9 +370,9 @@ def reports():
             SELECT type, SUM(amount) AS total
             FROM transactions
             WHERE user_id = ?
-            AND tx_date >= ?
-            AND tx_date <= ?
-            AND currency = ?
+              AND tx_date >= ?
+              AND tx_date <= ?
+              AND currency = ?
             GROUP BY type
         """, (uid, start, end, currency)).fetchall()
 
@@ -323,9 +387,7 @@ def reports():
                 expense = total
         return income, expense
 
-
     def donut_chart_data_url(title: str, income: float, expense: float):
-        # If no data, return None
         if income <= 0 and expense <= 0:
             return None
 
@@ -333,13 +395,12 @@ def reports():
         values = [income, expense]
         labels = ["Income", "Expenses"]
 
-        # Donut (pie with hole)
         plt.pie(
             values,
             labels=labels,
             autopct=lambda pct: f"{pct:.1f}%" if sum(values) > 0 else "",
             startangle=90,
-            wedgeprops={"width": 0.45}
+            wedgeprops={"width": 0.45},
         )
         plt.title(title)
 
@@ -351,7 +412,7 @@ def reports():
 
         return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("utf-8")
 
-    charts = {}  # currency -> data_url
+    charts = {}
 
     with get_conn() as conn:
         if selected_currency == "ALL":
@@ -359,20 +420,12 @@ def reports():
                 inc, exp = fetch_income_expense(conn, cur)
                 url = donut_chart_data_url(f"Income vs Expenses ({cur})", inc, exp)
                 if url:
-                    charts[cur] = {
-                        "income": inc,
-                        "expense": exp,
-                        "url": url
-                    }
+                    charts[cur] = {"income": inc, "expense": exp, "url": url}
         else:
             inc, exp = fetch_income_expense(conn, selected_currency)
             url = donut_chart_data_url(f"Income vs Expenses ({selected_currency})", inc, exp)
             if url:
-                charts[selected_currency] = {
-                    "income": inc,
-                    "expense": exp,
-                    "url": url
-                }
+                charts[selected_currency] = {"income": inc, "expense": exp, "url": url}
 
     return render_template(
         "reports.html",
@@ -380,210 +433,10 @@ def reports():
         end=end,
         selected_currency=selected_currency,
         currencies=CURRENCIES,
-        charts=charts
-    )
-@app.get("/register")
-def register():
-    return render_template("register.html")
-
-@app.post("/register")
-def register_post():
-    email = (request.form.get("email") or "").strip().lower()
-    password = request.form.get("password") or ""
-
-    if not email or not password:
-        flash("Email and password are required.", "error")
-        return redirect(url_for("register"))
-
-    if len(password) < 6:
-        flash("Password must be at least 6 characters.", "error")
-        return redirect(url_for("register"))
-
-    pw_hash = generate_password_hash(password)
-
-    # Create OTP + store hash (never store code in plain text)
-    code = generate_otp()
-    code_hash = generate_password_hash(code)
-    expires_at = utc_plus_minutes(10)
-
-    with get_conn() as conn:
-        try:
-            conn.execute("""
-                INSERT INTO users(email, password_hash, is_verified, verify_code_hash, verify_expires_at)
-                VALUES (?, ?, 0, ?, ?)
-            """, (email, pw_hash, code_hash, expires_at))
-        except Exception:
-            flash("Email already registered.", "error")
-            return redirect(url_for("register"))
-
-        user = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-        user_id = user["id"]
-
-    # Send email AFTER DB write
-    try:
-        send_verification_email(email, code)
-    except Exception as e:
-        # Don’t leave user stuck; show clear message
-        flash(f"Account created, but email could not be sent. Check SMTP settings. ({e})", "error")
-        return redirect(url_for("login"))
-
-    # Store "pending verification" in session
-    session["pending_user_id"] = user_id
-    flash("We sent a verification code to your email.", "success")
-    return redirect(url_for("verify_email"))
-
-@app.get("/verify")
-def verify_email():
-    pending = session.get("pending_user_id")
-    if not pending:
-        flash("No verification pending.", "error")
-        return redirect(url_for("login"))
-    return render_template("verify.html")
-
-@app.post("/verify")
-def verify_email_post():
-    pending = session.get("pending_user_id")
-    if not pending:
-        flash("No verification pending.", "error")
-        return redirect(url_for("login"))
-
-    code = (request.form.get("code") or "").strip()
-
-    with get_conn() as conn:
-        user = conn.execute(
-            "SELECT id, email, is_verified, verify_code_hash, verify_expires_at FROM users WHERE id=?",
-            (pending,)
-        ).fetchone()
-
-        if not user:
-            flash("User not found.", "error")
-            return redirect(url_for("login"))
-
-        if user["is_verified"] == 1:
-            flash("Already verified.", "success")
-            session.pop("pending_user_id", None)
-            return redirect(url_for("login"))
-
-        # Check expiry
-        if not user["verify_expires_at"]:
-            flash("No verification code found. Please request a new one.", "error")
-            return redirect(url_for("verify_email"))
-
-        expires = datetime.strptime(
-            user["verify_expires_at"],
-                "%Y-%m-%d %H:%M:%S"
-                ).replace(tzinfo=UTC)
-
-        if utc_now() > expires:
-            flash("Code expired. Please request a new one.", "error")
-            return redirect(url_for("verify_email"))
-
-
-        # Check code hash
-        if not user["verify_code_hash"] or not check_password_hash(user["verify_code_hash"], code):
-            flash("Invalid code.", "error")
-            return redirect(url_for("verify_email"))
-
-        # Verified ✅
-        conn.execute("""
-            UPDATE users
-            SET is_verified=1, verify_code_hash=NULL, verify_expires_at=NULL
-            WHERE id=?
-        """, (pending,))
-
-    session.pop("pending_user_id", None)
-
-    # Now log them in + seed categories
-    session["user_id"] = pending
-    with get_conn() as conn:
-        seed_defaults_for_user(pending, conn)
-
-    flash("Email verified. Welcome!", "success")
-    return redirect(url_for("home"))
-
-@app.get("/login")
-def login():
-    return render_template("login.html")
-
-@app.post("/login")
-def login_post():
-    email = (request.form.get("email") or "").strip().lower()
-    password = request.form.get("password") or ""
-
-    if not email or not password:
-        flash("Email and password are required.", "error")
-        return redirect(url_for("login"))
-
-    with get_conn() as conn:
-        user = conn.execute(
-            "SELECT * FROM users WHERE email=?",
-            (email,)
-        ).fetchone()
-
-    # ✅ If user doesn't exist -> show message (no verification)
-    if not user:
-        flash("No account found for this email. Please create an account first.", "error")
-        return redirect(url_for("register"))
-
-    if not check_password_hash(user["password_hash"], password):
-        flash("Invalid email or password.", "error")
-        return redirect(url_for("login"))
-
-    # ✅ If not verified -> redirect to verify page WITHOUT sending a new code
-    if user["is_verified"] == 0:
-        session["pending_user_id"] = user["id"]
-        flash("Your account is not verified. Please enter the code sent to your email when you registered.", "error")
-        return redirect(url_for("verify_email"))
-
-    # ✅ Verified -> login
-    session.clear()
-    session["user_id"] = user["id"]
-    flash("Welcome back.", "success")
-    return redirect(url_for("home"))
-
-    
-
-@app.post("/logout")
-def logout():
-    session.clear()
-    flash("Logged out.", "success")
-    return redirect(url_for("login"))
-def send_verification_email(to_email: str, code: str):
-    smtp_host = os.environ.get("SMTP_HOST")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ.get("SMTP_USER")
-    smtp_pass = os.environ.get("SMTP_PASS")
-    smtp_pass = (smtp_pass or "").replace(" ", "")
-    from_email = os.environ.get("FROM_EMAIL", smtp_user)
-    print("=== SMTP DEBUG ===")
-    print("SMTP_HOST:", os.environ.get("SMTP_HOST"))
-    print("SMTP_PORT:", os.environ.get("SMTP_PORT"))
-    print("SMTP_USER:", os.environ.get("SMTP_USER"))
-    print("FROM_EMAIL:", os.environ.get("FROM_EMAIL"))
-    print("==================")
-    print("SMTP_PASS present:", bool(os.environ.get("SMTP_PASS")), "len:", len(os.environ.get("SMTP_PASS") or ""))
-
-
-    if not all([smtp_host, smtp_user, smtp_pass, from_email]):
-        raise RuntimeError("SMTP env vars missing. Set SMTP_HOST, SMTP_USER, SMTP_PASS, FROM_EMAIL.")
-
-    msg = EmailMessage()
-    msg["Subject"] = "SRN Wallet verification code"
-    msg["From"] = from_email
-    msg["To"] = to_email
-    msg.set_content(
-        f"Your SRN Wallet verification code is: {code}\n\n"
-        f"This code expires in 10 minutes.\n"
-        f"If you didn't request this, ignore this email."
+        charts=charts,
     )
 
-    with smtplib.SMTP(smtp_host, smtp_port) as server:
-        server.starttls()
-        server.login(smtp_user, smtp_pass)
-        server.send_message(msg)
 
 
 if __name__ == "__main__":
-    
-    app.run(host="0.0.0.0",port=5000, debug=True)
-
+    app.run(host="0.0.0.0", port=5000, debug=True)
